@@ -1,93 +1,126 @@
 package com.meng.tbjavagateway.reportTelemetry;
 
+import com.meng.tbjavagateway.config.RedisUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.eclipse.paho.client.mqttv3.*;
+import org.springframework.beans.factory.annotation.Value;
 
 import javax.annotation.PostConstruct;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
+import java.io.IOException;
 
+/**
+ * @Date: 2024/5/29
+ * @Author: mengGod
+ * @Description: tb网关类
+ * 常见info打印应该使用英文，避免日志文件过大
+ */
 public class JavaGateway {
-    private List<MqttClient> mqttConnections;
-    private CountDownLatch connectionLatch;
-    private MqttCallback mqttCallback;
+    private static final Logger logger = LogManager.getLogger(JavaGateway.class);
     private MqttClient mqttClient;
+    private RedisUtils redisUtils;
+    private MqttCallback mqttCallback;
     private String topic = "v1/gateway/telemetry";
     private String topicDing = "v1/gateway/rpc";
     private String topicConnect = "v1/gateway/connect";
 
+    @Value("${mqtt.host}")
+    private String host;
+
+    @Value("${mqtt.port}")
+    private String port;
+
+    @Value("${mqtt.username}")
+    private String username;
+
     @PostConstruct
     public void initializeConnections() {
-        mqttConnections = new ArrayList<>();
-        connectionLatch = new CountDownLatch(1);
-        mqttCallback = new MqttMessageHandler(); // 创建 MqttMessageHandler 实例
-        System.out.println("Java Gateway网关开始创建连接");
         try {
-
-            MqttClient mqttClient = new MqttClient("tcp://10.67.181.66:1884", "java");
+            mqttClient = new MqttClient("tcp://" + host + ":" + port, username);
 
             MqttConnectOptions connectOptions = new MqttConnectOptions();
-            connectOptions.setUserName("java");
-            connectOptions.setPassword("java".toCharArray());
-            mqttClient.connect(connectOptions);
-            System.out.println("Java Gateway网关连接创建完成");
+            connectOptions.setUserName(username);
+            connectOptions.setPassword(username.toCharArray());
+
             // 设置回调接口
+            mqttCallback = new MqttMessageHandler();
             mqttClient.setCallback(mqttCallback);
+
+            // 连接
+            mqttClient.connect(connectOptions);
 
             // 订阅主题
             mqttClient.subscribe(topicDing);
 
-            mqttConnections.add(mqttClient);
-            connectionLatch.countDown(); // 连接创建完成，计数减一
+            logger.info("Java Gateway connection creation complete");
         } catch (MqttException e) {
+            logger.error("创建 MQTT 连接时发生错误: {}", e);
             // 处理创建连接的异常
             e.printStackTrace();
-            System.out.println("创建 MQTT 连接时发生错误" + e);
         }
+    }
 
+    public void dailyRestart() {
+        redisUtils.set("exceptionNumber", "0");
         try {
-            connectionLatch.await(); // 所有连接创建完成
-            mqttClient = mqttConnections.get(0);
-        } catch (InterruptedException e) {
+            Runtime.getRuntime().exec("sudo systemctl restart javaGateway.service");
+            System.exit(0); // 退出当前进程
+        } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    public void javaGatewaySend(String message){
+    public void javaGatewaySend(String message) {
         try {
-            mqttClient.publish(topic, message.getBytes(), 0, false);
-            System.out.println("遥测上报成功：" + message);
+            if (!mqttClient.isConnected()) {
+                logger.warn("Client is not connected, attempting to reconnect: {}", mqttClient.getClientId());
+                handleMqttException(new MqttException(MqttException.REASON_CODE_CLIENT_NOT_CONNECTED));
+            } else {
+                mqttClient.publish(topic, message.getBytes(), 0, false);
+            }
         } catch (MqttException e) {
-            // 处理发送消息的异常
-            System.out.println("线程出现异常：" + mqttClient + "/n 异常原因：" + e);
-            handleMqttException(mqttClient, e);
+            logger.error("send线程出现异常: {} /n 异常原因: {}", mqttClient, e);
+            handleMqttException(e);
         }
     }
 
-    public void javaGatewayConnect(String message){
+    public void javaGatewayConnect(String message) {
         try {
             mqttClient.publish(topicConnect, message.getBytes(), 0, false);
-            System.out.println("初始化成功：" + message);
+            logger.info("Successful initialization: {}", message);
         } catch (MqttException e) {
-            // 处理发送消息的异常
-            System.out.println("线程出现异常：" + mqttClient + "/n 异常原因：" + e);
-            handleMqttException(mqttClient, e);
+            logger.error("connect线程出现异常: {} /n 异常原因: {}", mqttClient, e);
+            handleMqttException(e);
         }
     }
 
-    private void handleMqttException(MqttClient mqttClient, MqttException e) {
+    private void handleMqttException(MqttException e) {
         if (e.getReasonCode() == MqttException.REASON_CODE_CLIENT_NOT_CONNECTED) {
-            System.out.println(mqttClient.getClientId() + " 连接丢失，进行重新连接");
+            logger.warn("Connection lost, attempting to reconnect: {}", mqttClient.getClientId());
             try {
                 mqttClient.reconnect();
-                System.out.println(mqttClient.getClientId() + " 重新连接成功");
+                int s = Integer.parseInt(redisUtils.get("exceptionNumber"));
+                if (s == 10){
+                    logger.error(">>> 系统检测到连接异常，即将自动重启程序! <<<");
+                    dailyRestart();
+                }
+                redisUtils.set("exceptionNumber", String.valueOf(s+1));
+                logger.info("Reconnection successful: {}", mqttClient.getClientId());
             } catch (MqttException ex) {
-                ex.printStackTrace();
-                System.out.println("重新连接 MQTT 连接时发生错误：" + ex);
+                logger.error("Error during MQTT reconnection: {}", ex);
             }
         } else {
-            e.printStackTrace();
-            System.out.println("发送消息时发生其他 MQTT 异常：" + e);
+            logger.error("Other MQTT exception occurred during message sending: {}", e);
+        }
+    }
+
+    private void restartApplication() {
+        try {
+            logger.error("Restarting the application due to MQTT connection issues.");
+            Runtime.getRuntime().exec("sudo systemctl restart javaGateway.service");
+            System.exit(0); // 退出当前进程
+        } catch (IOException e) {
+            logger.error("Failed to restart the application: {}", e);
         }
     }
 }

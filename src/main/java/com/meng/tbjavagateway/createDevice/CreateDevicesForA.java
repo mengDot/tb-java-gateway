@@ -6,14 +6,14 @@ import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 
 public class CreateDevicesForA {
-    private static final String BROKER = "tcp://10.67.181.66:1884";
+    private static final String BROKER = "tcp://10.67.181.100:1884";
     private static final String USERNAME = "java";
     private static final String PASSWORD = "java";
     private static final String CLIENTID = "java";
 
     //名称后面会加上自动数字，例如：deviceA-1，数量取决于DEVICE_COUNT
     private static final String DEVICENAME = "deviceA-";
-    private static final int DEVICE_COUNT = 500;
+    private static final int DEVICE_COUNT = 1000;
 
     public static void main(String[] args) {
         try {
